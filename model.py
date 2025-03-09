@@ -20,6 +20,7 @@ class Head(nn.Module):
         wei = F.softmax(wei, dim=-1)
         wei = self.dropout(wei)
         v = self.value(x)
+
         return wei @ v
 
 class MultiHeadAttention(nn.Module):
@@ -40,7 +41,7 @@ class FeedFoward(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_embd, 4 * n_embd),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(4 * n_embd, n_embd),
             nn.Dropout(dropout),
         )
@@ -71,6 +72,16 @@ class LanguageModel(nn.Module):
         self.lm_head = nn.Linear(n_embd, vocab_size)
         self.block_size = block_size
 
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
     def forward(self, idx, targets=None):
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx)
@@ -79,6 +90,7 @@ class LanguageModel(nn.Module):
         x = self.blocks(x)
         x = self.ln_f(x)
         logits = self.lm_head(x)
+
         if targets is None:
             loss = None
         else:
@@ -86,6 +98,7 @@ class LanguageModel(nn.Module):
             logits = logits.view(B * T, C)
             targets = targets.view(B * T)
             loss = F.cross_entropy(logits, targets)
+
         return logits, loss
 
     def generate(self, idx, max_new_tokens):

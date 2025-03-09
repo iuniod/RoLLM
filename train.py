@@ -1,5 +1,4 @@
 import torch
-from torch.nn import functional as F
 import torch.optim as optim
 from tqdm import tqdm
 from data_utils import prepare_data, split_data
@@ -16,7 +15,7 @@ eval_iters = 200
 n_embd = 64
 n_head = 4
 n_layer = 4
-dropout = 0.0
+dropout = 0.1
 
 torch.manual_seed(1337)
 
