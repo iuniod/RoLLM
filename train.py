@@ -3,6 +3,8 @@ import torch.optim as optim
 from tqdm import tqdm
 from data_utils import prepare_data, split_data
 from model import LanguageModel
+import wandb
+import os
 
 # hyperparameters
 batch_size = 16
@@ -40,9 +42,25 @@ def estimate_loss(model, train_data, val_data):
     model.train()
     return out
 
-def main():
-    print('Loading data...')
-    data, vocab_size, encode, decode = prepare_data('./datasets/ro_part_00000.parquet_texts_cleaned.txt')
+
+if __name__ == "__main__":
+    # Initialize Weights & Biases
+    wandb.login(key=os.getenv("WANDB_API_KEY"))
+    wandb.init(project="language_model_training", config={
+        "batch_size": batch_size,
+        "block_size": block_size,
+        "max_iters": max_iters,
+        "eval_interval": eval_interval,
+        "learning_rate": learning_rate,
+        "device": device,
+        "eval_iters": eval_iters,
+        "n_embd": n_embd,
+        "n_head": n_head,
+        "n_layer": n_layer,
+        "dropout": dropout
+    })
+
+    data, vocab_size, encode, decode = prepare_data('./datasets/ro_part_00000_cleaned.parquet')
     train_data, val_data = split_data(data)
 
     model = LanguageModel(vocab_size, n_embd, block_size, n_head, n_layer, dropout).to(device)
@@ -52,8 +70,9 @@ def main():
 
     for iter in tqdm(range(max_iters), desc='Training'):
         if iter % eval_interval == 0 or iter == max_iters - 1:
+            # Log losses to wandb
             losses = estimate_loss(model, train_data, val_data)
-            print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            wandb.log({"train_loss": losses['train'], "val_loss": losses['val'], "step": iter})
 
         xb, yb = get_batch(train_data, val_data, 'train')
         logits, loss = model(xb, yb)
@@ -61,8 +80,16 @@ def main():
         loss.backward()
         optimizer.step()
 
+        # Log batch loss to wandb
+        wandb.log({"batch_loss": loss.item(), "step": iter})
+
+    # Save the final model
+    torch.save(model.state_dict(), "final_model.pth")
+    wandb.save("final_model.pth")
+
+    # Generate some text
     context = torch.zeros((1, 1), dtype=torch.long, device=device)
     print(decode(model.generate(context, max_new_tokens=2000)[0].tolist()))
 
-if __name__ == "__main__":
-    main()
+    # Finish wandb run
+    wandb.finish()

@@ -2,3 +2,9 @@ langdetect
 tqdm
 torch
 transformers
+emoji
+ftfy
+pandas
+fastparquet
+pyarrow
+wandb
