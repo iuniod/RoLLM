@@ -5,6 +5,7 @@ from data_utils import prepare_data, split_data
 from model import LanguageModel
 from torch.optim.lr_scheduler import ExponentialLR
 import wandb
+import os
 
 # hyperparameters
 batch_size = 16
@@ -74,7 +75,7 @@ def lr_finder(model, train_data, optimizer, device, start_lr=1e-7, end_lr=10, nu
         wandb.log({"learning_rate": lrs[-1], "loss": losses[-1]})
 
     wandb.finish()
-    return lrs[losses.index(min(losses))] / 10  # Heuristic to choose LR
+    return lrs[losses.index(min(losses))] / 10
 
 
 def train(model, optimizer, train_data, val_data, device, max_iters=1000, save_path="model.pth"):
@@ -106,8 +107,7 @@ def train(model, optimizer, train_data, val_data, device, max_iters=1000, save_p
 
 if __name__ == "__main__":
     # Initialize Weights & Biases
-    # wandb.login(key=os.getenv("WANDB_API_KEY"))
-    wandb.login(key="be8a68816c4b27ad6b6042dd1ee56f472001542f")
+    wandb.login(key=os.getenv("WANDB_API_KEY"))
     print(f"Using device: {device}")
 
     scaler = torch.amp.GradScaler('cuda')
