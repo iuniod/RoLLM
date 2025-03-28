@@ -3,3 +3,4 @@ venv/
 __pycache__/
 datasets/
 .DS_Store
+encoded_texts.pt
