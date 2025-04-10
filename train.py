@@ -10,7 +10,7 @@ import os
 # hyperparameters
 batch_size = 16
 block_size = 512
-max_iters = 5000
+max_iters = 50000
 eval_interval = 100
 learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -49,7 +49,7 @@ def estimate_loss(model, train_data, val_data, device):
     return out
 
 
-def lr_finder(model, train_data, optimizer, device, start_lr=1e-7, end_lr=10, num_iter=1000):
+def lr_finder(model, train_data, optimizer, device, scaler, start_lr=1e-7, end_lr=10, num_iter=1000):
     """Finds the optimal learning rate by gradually increasing it and logging loss."""
     model.train()
     wandb.init(project="learning-rate-finder", name="LR Finder")
@@ -62,8 +62,7 @@ def lr_finder(model, train_data, optimizer, device, start_lr=1e-7, end_lr=10, nu
     for _ in tqdm(range(num_iter), desc="LR Finder"):
         xb, yb = get_batch(train_data, train_data, 'train')
         optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(device_type=device, dtype=torch.float16):
-            _, loss = model(xb, yb)
+        _, loss = model(xb, yb)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -78,7 +77,7 @@ def lr_finder(model, train_data, optimizer, device, start_lr=1e-7, end_lr=10, nu
     return lrs[losses.index(min(losses))] / 10
 
 
-def train(model, optimizer, train_data, val_data, device, max_iters=1000, save_path="model.pth"):
+def train(model, optimizer, train_data, val_data, device, scaler, max_iters=1000, save_path="model.pth"):
     """Trains the model and logs metrics to wandb."""
     model.to(device)
     wandb.init(project="training", name="Model Training")
@@ -120,13 +119,13 @@ if __name__ == "__main__":
 
     # Find the optimal learning rate
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-    optimal_lr = lr_finder(model, train_data, optimizer, device)
+    optimal_lr = lr_finder(model, train_data, optimizer, device, scaler)
     print(f"Optimal learning rate: {optimal_lr}")
 
     # Training
     model = LanguageModel(vocab_size, n_embd, block_size, n_head, n_layer, dropout).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=optimal_lr)
-    train(model, optimizer, train_data, val_data, device, max_iters)
+    train(model, optimizer, train_data, val_data, device, scaler, max_iters)
 
     # Generate some text
     context = torch.zeros((1, 1), dtype=torch.long, device=device)

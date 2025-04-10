@@ -4,6 +4,7 @@ from transformers import GPT2Tokenizer
 import pandas as pd
 
 ENCODED_TEXTS_PATH = 'encoded_texts.pt'
+CHUNK_SIZE = 1024
 
 def prepare_data(file_path, model_name="gpt2"):
     dp = pd.read_parquet(file_path)
@@ -14,12 +15,17 @@ def prepare_data(file_path, model_name="gpt2"):
         try:
             data = torch.load(ENCODED_TEXTS_PATH)
         except FileNotFoundError:
-            encoded_texts = [
-                torch.tensor(tokenizer.encode(text, truncation=True, max_length=1024), dtype=torch.long)
-                for text in tqdm(texts, desc='Encoding texts')
-            ]
-            data = torch.cat(encoded_texts)
+            encoded_texts = []
 
+            for text in tqdm(texts, desc="Encoding texts"):
+                encoded = tokenizer.encode(text, truncation=False)
+                chunks = [
+                    torch.tensor(encoded[i : i + CHUNK_SIZE], dtype=torch.long)
+                    for i in range(0, len(encoded), CHUNK_SIZE)
+                ]
+                encoded_texts.extend(chunks)
+
+            data = torch.cat(encoded_texts)
             torch.save(data, ENCODED_TEXTS_PATH)
 
     return data, tokenizer.vocab_size, tokenizer.encode, tokenizer.decode
