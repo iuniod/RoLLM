@@ -1,20 +1,32 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from rotary_embedding_torch import RotaryEmbedding
 
 class Head(nn.Module):
-    def __init__(self, n_embd, head_size, block_size, dropout):
+    def __init__(self, n_embd, head_size, block_size, dropout, use_rope=False):
         super().__init__()
+        self.use_rope = use_rope
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
         self.dropout = nn.Dropout(dropout)
 
+        # rotary positional encoder for this head
+        if self.use_rope:
+            self.rotary_emb = RotaryEmbedding(dim = head_size, use_xpos = True)
+
     def forward(self, x):
         B, T, C = x.shape
-        k = self.key(x)
-        q = self.query(x)
+        k = self.key(x) # (B, T, head_size)
+        q = self.query(x) # (B, T, head_size)
+
+        if self.use_rope:
+            # apply rotary position embeddings to both q and k
+            q, k = self.rotary_emb.rotate_queries_and_keys(q, k)
+            # now q, k each still have shape (B, T, head_size)
+
         wei = q @ k.transpose(-2, -1) * C**-0.5
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1)
@@ -24,10 +36,10 @@ class Head(nn.Module):
         return wei @ v
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, n_embd, num_heads, block_size, dropout):
+    def __init__(self, n_embd, num_heads, block_size, dropout, use_rope=False):
         super().__init__()
         head_size = n_embd // num_heads
-        self.heads = nn.ModuleList([Head(n_embd, head_size, block_size, dropout) for _ in range(num_heads)])
+        self.heads = nn.ModuleList([Head(n_embd, head_size, block_size, dropout, use_rope) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
         self.dropout = nn.Dropout(dropout)
 
@@ -50,9 +62,9 @@ class FeedFoward(nn.Module):
         return self.net(x)
 
 class Block(nn.Module):
-    def __init__(self, n_embd, n_head, block_size, dropout):
+    def __init__(self, n_embd, n_head, block_size, dropout, use_rope=False):
         super().__init__()
-        self.sa = MultiHeadAttention(n_embd, n_head, block_size, dropout)
+        self.sa = MultiHeadAttention(n_embd, n_head, block_size, dropout, use_rope)
         self.ffwd = FeedFoward(n_embd, dropout)
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
@@ -63,11 +75,16 @@ class Block(nn.Module):
         return x
 
 class LanguageModel(nn.Module):
-    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout):
+    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, use_rope=False):
         super().__init__()
+        self.use_rope = use_rope
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head, block_size, dropout) for _ in range(n_layer)])
+        if not self.use_rope:
+            self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.blocks = nn.Sequential(*[
+            Block(n_embd, n_head, block_size, dropout, use_rope)
+            for _ in range(n_layer)
+        ])
         self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
         self.block_size = block_size
@@ -85,8 +102,13 @@ class LanguageModel(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))
-        x = tok_emb + pos_emb
+
+        if self.use_rope:
+            x = tok_emb
+        else:
+            pos = torch.arange(T, device=idx.device)
+            x = tok_emb + self.position_embedding_table(pos)
+
         x = self.blocks(x)
         x = self.ln_f(x)
         logits = self.lm_head(x)
