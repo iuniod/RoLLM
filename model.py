@@ -92,7 +92,7 @@ class LanguageModel(nn.Module):
                 for _ in range(n_layer)
             ])
             # one learnable weight per skip pair
-            self.skip_weights = nn.Parameter(torch.ones(n_layer // 2))
+            self.skip_weights = nn.Parameter(torch.zeros(n_layer // 2))
         else:
             # standard sequential stacking
             self.blocks = nn.Sequential(*[
