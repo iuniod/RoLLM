@@ -205,6 +205,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the RoLLM model.")
     parser.add_argument("--use_muon", action="store_true", help="Use Muon optimizer for ≥2D parameters.")
     parser.add_argument("--use_rope", action="store_true", help="Use Rotary Positional Embedding.")
+    parser.add_argument("--use_unet_skip", action="store_true", help="Use U-Net skip connections.")
     args = parser.parse_args()
 
     # Initialize distributed training if using Muon
@@ -220,7 +221,7 @@ if __name__ == "__main__":
     data, vocab_size, encode, decode = prepare_data('./datasets/ro_part_00000_cleaned.parquet')
     train_data, val_data = split_data(data)
 
-    model = LanguageModel(vocab_size, n_embd, block_size, n_head, n_layer, dropout, use_rope=args.use_rope).to(device)
+    model = LanguageModel(vocab_size, n_embd, block_size, n_head, n_layer, dropout, use_rope=args.use_rope, use_unet_skip=args.use_unet_skip).to(device)
     print(sum(p.numel() for p in model.parameters()) / 1e6, 'M parameters')
 
     # Training

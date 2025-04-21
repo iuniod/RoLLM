@@ -75,16 +75,30 @@ class Block(nn.Module):
         return x
 
 class LanguageModel(nn.Module):
-    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, use_rope=False):
+    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, use_rope=False, use_unet_skip=False):
         super().__init__()
         self.use_rope = use_rope
+        self.use_unet_skip = use_unet_skip
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         if not self.use_rope:
             self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[
-            Block(n_embd, n_head, block_size, dropout, use_rope)
-            for _ in range(n_layer)
-        ])
+
+        # Transformer blocks: either sequential or ModuleList with U-Net skips
+        if self.use_unet_skip:
+            assert n_layer % 2 == 0, "Number of layers must be even for U-Net skipping"
+            # create blocks as ModuleList for indexed forward
+            self.blocks = nn.ModuleList([
+                Block(n_embd, n_head, block_size, dropout, use_rope)
+                for _ in range(n_layer)
+            ])
+            # one learnable weight per skip pair
+            self.skip_weights = nn.Parameter(torch.ones(n_layer // 2))
+        else:
+            # standard sequential stacking
+            self.blocks = nn.Sequential(*[
+                Block(n_embd, n_head, block_size, dropout, use_rope)
+                for _ in range(n_layer)
+            ])
         self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
         self.block_size = block_size
@@ -109,7 +123,22 @@ class LanguageModel(nn.Module):
             pos = torch.arange(T, device=idx.device)
             x = tok_emb + self.position_embedding_table(pos)
 
-        x = self.blocks(x)
+        # apply transformer blocks
+        if self.use_unet_skip:
+            skip_stack = []
+            half = len(self.blocks) // 2
+            for i, block in enumerate(self.blocks):
+                if i >= half:
+                    # add skip from corresponding early layer
+                    x = x + self.skip_weights[i - half] * skip_stack.pop()
+                x = block(x)
+                if i < half:
+                    # store for later skip
+                    skip_stack.append(x)
+        else:
+            # simple sequential application
+            x = self.blocks(x)
+
         x = self.ln_f(x)
         logits = self.lm_head(x)
 
