@@ -1,15 +1,18 @@
-import torch
-import torch.optim as optim
-from tqdm import tqdm
-from data_utils import prepare_data, split_data
-from model import LanguageModel
-import wandb
+from typing import Tuple, List, Union, Optional, Sequence, Dict
+import copy
 import os
 import argparse
-from muon import Muon
 import torch.distributed as dist
+import torch
+import wandb
+import numpy as np
+from torch import optim
+from tqdm import tqdm
+from muon import Muon
+from data_utils import prepare_data, split_data
+from model import LanguageModel
 
-def setup_distributed():
+def setup_distributed() -> None:
     if not dist.is_initialized():
         dist.init_process_group(
             backend="nccl" if torch.cuda.is_available() else "gloo",
@@ -18,39 +21,49 @@ def setup_distributed():
         torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
 # hyperparameters
-batch_size = 16
-block_size = 512
-max_iters = 50000
-eval_interval = 100
-learning_rate = 1e-3
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 200
-n_embd = 512
-n_head = 8
-n_layer = 8
-dropout = 0.0
+BATCH_SIZE = 16
+BLOCK_SIZE = 256
+MAX_ITERS = 50000
+EVAL_INTERVAL = 250
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+EVAL_ITERS = 200
+N_EMBD = 1280
+N_HEAD = 20
+N_LAYER = 36
+DROPOUT = 0.0
+OPTIMAL_ADAM_LR = None
+OPTIMAL_MUON_LR = None
 
 torch.manual_seed(1337)
 
-def get_batch(train_data, val_data, split):
+def get_batch(
+    train_data: torch.Tensor,
+    val_data: torch.Tensor,
+    split: str
+) -> Tuple[torch.Tensor, torch.Tensor]:
     data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i + block_size] for i in ix]).to(device, non_blocking=True)
-    y = torch.stack([data[i + 1:i + block_size + 1] for i in ix]).to(device, non_blocking=True)
+    ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE,))
+    x = torch.stack([data[i:i + BLOCK_SIZE] for i in ix]).to(DEVICE, non_blocking=True)
+    y = torch.stack([data[i + 1:i + BLOCK_SIZE + 1] for i in ix]).to(DEVICE, non_blocking=True)
 
     return x, y
 
 @torch.no_grad()
-def estimate_loss(model, train_data, val_data, device):
+def estimate_loss(
+    model: LanguageModel,
+    train_data: torch.Tensor,
+    val_data: torch.Tensor,
+    device: Union[str, torch.device]
+) -> Dict[str, torch.Tensor]:
     out = {}
     model.eval()
-    losses = torch.zeros(eval_iters, device=device)
+    losses = torch.zeros(EVAL_ITERS, device=device)
 
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(train_data, val_data, split)
-            _, loss = model(X, Y)
+        losses = torch.zeros(EVAL_ITERS)
+        for k in range(EVAL_ITERS):
+            x, y = get_batch(train_data, val_data, split)
+            _, loss = model(x, y)
             losses[k] = loss.item()
         out[split] = losses.mean()
 
@@ -58,117 +71,189 @@ def estimate_loss(model, train_data, val_data, device):
 
     return out
 
+def find_lr(
+    model: LanguageModel,
+    optimizer: Union[optim.Optimizer, Muon],
+    train_data: torch.Tensor,
+    start_lr: float,
+    end_lr: float,
+    num_iter: int = 300,
+    smooth_beta: float = 0.9
+) -> Tuple[np.ndarray, np.ndarray]:
+    # Save initial state
+    init_model = copy.deepcopy(model.state_dict())
+    init_opt   = copy.deepcopy(optimizer.state_dict())
 
-def lr_finder(model, train_data, optimizer, scaler, param_groups=None, num_iter=100, start_lr=1e-7, end_lr=1e-2):
-    """Improved LR finder that:
-    - Only operates on specified parameters
-    - Has better warmup
-    - More stable loss tracking
-    """
+    mult = (end_lr / start_lr) ** (1 / num_iter)
+    warmup_iters = max(1, int(0.1 * num_iter))
+
+    lr = start_lr
+    for g in optimizer.param_groups:
+        g['lr'] = lr
+
     model.train()
-    original_params = {n: p.detach().clone() for n, p in model.named_parameters()}
-    gamma = (end_lr / start_lr) ** (1 / num_iter)
+    avg_loss = 0.0
+    lrs, losses = [], []
 
-    # Warmup steps (avoid early instability)
-    warmup_iters = min(10, num_iter // 10)
-    
-    lrs = []
-    losses = []
-    best_lr = start_lr
-    min_loss = float('inf')
-    
-    progress = tqdm(range(num_iter), desc="LR Finder")
-    for i in progress:
-        # Exponential LR schedule
-        lr = start_lr * (gamma ** i)
-        
-        # Update optimizer LR
+    for it in tqdm(range(num_iter), desc="LR sweep"):
+        x, y = get_batch(train_data, train_data, 'train')
+        # Compute this iteration's learning rate
+        if it < warmup_iters:
+            lr = start_lr * ((it + 1) / warmup_iters)
+        else:
+            lr = start_lr * (mult ** it)
+
         for g in optimizer.param_groups:
-            g['lr'] = lr if i >= warmup_iters else start_lr * (i/warmup_iters)
-        
-        # Get batch and forward/backward
-        xb, yb = get_batch(train_data, train_data, 'train')
+            g['lr'] = lr
+
+        # Now do the usual forward/backward
         optimizer.zero_grad()
-        _, loss = model(xb, yb)
-        
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        
-        # Track stats
-        current_loss = loss.item()
+
+        _, loss = model(x, y)
+        loss_v = loss.item()
+
+        # Smooth
+        avg_loss = smooth_beta * avg_loss + (1 - smooth_beta) * loss_v
+        sm = avg_loss / (1 - smooth_beta ** (it + 1))
+
         lrs.append(lr)
-        losses.append(current_loss)
-        
-        # Update best LR (minimum loss slope)
-        if current_loss < min_loss * 0.999:  # Small tolerance
-            min_loss = current_loss
-            best_lr = lr
-        
-        progress.set_postfix({
-            'lr': f"{lr:.2e}",
-            'loss': f"{current_loss:.4f}",
-            'best_lr': f"{best_lr:.2e}"
-        })
-    
-    # Restore original model parameters
-    for n, p in model.named_parameters():
-        p.data.copy_(original_params[n])
-    
-    return best_lr
+        losses.append(sm)
+
+        loss.backward()
+        optimizer.step()
+
+        lr *= mult
+        for g in optimizer.param_groups:
+            g['lr'] = lr
+
+    # Restore
+    model.load_state_dict(init_model)
+    optimizer.load_state_dict(init_opt)
+
+    return np.array(lrs), np.array(losses)
 
 
-def create_optimizer(model, use_muon=False):
+def get_optimal_lr(
+    lrs: np.ndarray,
+    losses: np.ndarray,
+    smoothing_window: int = 5,
+    factor: float = 5.0
+) -> float:
+    # Smooth and compute gradient
+    if smoothing_window > 1:
+        kernel = np.ones(smoothing_window) / smoothing_window
+        losses = np.convolve(losses, kernel, mode='same')
+    grads = np.gradient(losses, np.log10(lrs))
+    idx   = np.nanargmin(grads)
+    chosen = lrs[idx] / factor
+    print(f"Steepest slope at LR={lrs[idx]:.2e}; selected={chosen:.2e} (factor={factor})")
+
+    return float(chosen)
+
+
+def find_optimal_lr_adam(
+    model: LanguageModel,
+    train_data: torch.Tensor,
+    params: Sequence[torch.Tensor],
+    start_lr: float = 1e-7,
+    end_lr: float = 1e-2,
+    num_iter: int = 100,
+    smoothing_window: int = 1,
+    factor: float = 1.0
+) -> float:
+    opt = optim.AdamW(params, lr=start_lr, weight_decay=0.0)
+    lrs, losses = find_lr(model, opt, train_data, start_lr, end_lr, num_iter)
+
+    return get_optimal_lr(lrs, losses, smoothing_window, factor)
+
+
+def find_optimal_lr_muon(
+    model: LanguageModel,
+    train_data: torch.Tensor,
+    params: Sequence[torch.Tensor],
+    start_lr: float = 1e-6,
+    end_lr: float = 1e-2,
+    num_iter: int = 150,
+    smoothing_window: int = 3,
+    factor: float = 5.0
+) -> float:
+    opt = Muon(params, lr=start_lr, momentum=0.0, rank=0, world_size=1)
+    lrs, losses = find_lr(model, opt, train_data, start_lr, end_lr, num_iter)
+
+    return get_optimal_lr(lrs, losses, smoothing_window, factor)
+
+def create_optimizer(
+    model: LanguageModel,
+    train_data: torch.Tensor,
+    use_muon: bool = False,
+    optimal_adam_lr: Optional[float] = OPTIMAL_ADAM_LR,
+    optimal_muon_lr: Optional[float] = OPTIMAL_MUON_LR
+) -> Tuple[List[Union[optim.Optimizer, Muon]], bool]:
     # Create lists for different parameter types
     muon_params = []
     other_params = []
-    
-    # Categorize parameters more carefully
-    print("Categorizing parameters for optimizers...\nTotal parameters: ", sum(p.numel() for p in model.parameters()))
-    for name, param in model.named_parameters():
+
+    print(
+        "Categorizing parameters for optimizers...\nTotal parameters: ",
+        sum(p.numel() for p in model.parameters())
+    )
+    for _, param in model.named_parameters():
         if not param.requires_grad:
             continue
         if use_muon and param.ndim >= 2:
             muon_params.append(param)
         else:
             other_params.append(param)
-    
+
     # Create optimizers
     optimizers = []
+    train_data_subset = train_data[:BLOCK_SIZE * 2048]
+
     if use_muon and muon_params:
         print(f"Using Muon for {len(muon_params)} parameters")
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-        optimizers.append(Muon(muon_params, lr=0.02, momentum=0.95, rank=rank, world_size=world_size))
+
+        if optimal_muon_lr is None:
+            optimal_muon_lr = find_optimal_lr_muon(model, train_data_subset, muon_params)
+        muon_opt = Muon(muon_params, lr=optimal_muon_lr, momentum=0.95, rank=0, world_size=1)
+        for g in muon_opt.param_groups:
+            g['lr'] = optimal_muon_lr
+        print(f"Optimal Muon LR ≈ {optimal_muon_lr:.2e}")
+        optimizers.append(muon_opt)
+
     if other_params:
         print(f"Using AdamW for {len(other_params)} parameters")
-        adam_optimizer = optim.AdamW(other_params, lr=learning_rate)
-        optimal_lr = lr_finder(
-            model=model,
-            train_data=train_data,
-            optimizer=adam_optimizer,
-            scaler=scaler,
-            param_groups=other_params  # Only optimize these params during LR find
-        )
+
+        if optimal_adam_lr is None:
+            optimal_adam_lr = find_optimal_lr_adam(model, train_data_subset, other_params)
+        adam_optimizer = optim.AdamW(other_params, lr=optimal_adam_lr)
         for g in adam_optimizer.param_groups:
-            g['lr'] = optimal_lr
-        print(f"Found optimal LR: {optimal_lr:.2e}")
+            g['lr'] = optimal_adam_lr
+        print(f"Optimal Adam LR ≈ {optimal_adam_lr:.2e}")
         optimizers.append(adam_optimizer)
-    
+
     # Determine if we should use gradient scaling - only if Muon is not used
     use_grad_scaler = not use_muon or not muon_params
 
     return optimizers, use_grad_scaler
 
 
-def train(model, optimizers, train_data, val_data, device, scaler, max_iters, save_path="model.pth", use_grad_scaler=False):
+def train(
+    model: LanguageModel,
+    optimizers: List[Union[optim.Optimizer, Muon]],
+    train_data: torch.Tensor,
+    val_data: torch.Tensor,
+    device: Union[str, torch.device],
+    scaler: torch.cuda.amp.GradScaler,
+    max_iters: int,
+    save_path: str = "model.pth",
+    use_grad_scaler: bool = False
+) -> None:
     """Trains the model and logs metrics to wandb."""
-    model.to(device)
-    wandb.init(project="training", name="Model Training")
+    wandb.init(project="training_1B", name="Model Training")
 
     for iter in tqdm(range(max_iters), desc='Training'):
         # Periodic evaluation
-        if iter % eval_interval == 0 or iter == max_iters - 1:
+        if iter % EVAL_INTERVAL == 0 or iter == max_iters - 1:
             losses = estimate_loss(model, train_data, val_data, device)
             wandb.log({"train_loss": losses['train'], "val_loss": losses['val']})
 
@@ -177,11 +262,11 @@ def train(model, optimizers, train_data, val_data, device, scaler, max_iters, sa
 
         # Forward pass
         _, loss = model(xb, yb)
-        
+
         # Backward pass
         for opt in optimizers:
             opt.zero_grad(set_to_none=True)
-        
+
         if use_grad_scaler:
             scaler.scale(loss).backward()
             for opt in optimizers:
@@ -203,7 +288,9 @@ def train(model, optimizers, train_data, val_data, device, scaler, max_iters, sa
 if __name__ == "__main__":
     # Argument parsing
     parser = argparse.ArgumentParser(description="Train the RoLLM model.")
-    parser.add_argument("--use_muon", action="store_true", help="Use Muon optimizer for ≥2D parameters.")
+    parser.add_argument(
+        "--use_muon", action="store_true", help="Use Muon optimizer for ≥2D parameters."
+    )
     parser.add_argument("--use_rope", action="store_true", help="Use Rotary Positional Embedding.")
     parser.add_argument("--use_unet_skip", action="store_true", help="Use U-Net skip connections.")
     args = parser.parse_args()
@@ -214,20 +301,27 @@ if __name__ == "__main__":
 
     # Initialize Weights & Biases
     wandb.login(key=os.getenv("WANDB_API_KEY"))
-    print(f"Using device: {device}")
+    print(f"Using device: {DEVICE}")
 
     scaler = torch.amp.GradScaler('cuda')
 
     data, vocab_size, encode, decode = prepare_data('./datasets/ro_part_00000_cleaned.parquet')
     train_data, val_data = split_data(data)
 
-    model = LanguageModel(vocab_size, n_embd, block_size, n_head, n_layer, dropout, use_rope=args.use_rope, use_unet_skip=args.use_unet_skip).to(device)
+    model = LanguageModel(
+        vocab_size, N_EMBD, BLOCK_SIZE, N_HEAD, N_LAYER, DROPOUT,
+        use_rope=args.use_rope, use_unet_skip=args.use_unet_skip
+    ).to(DEVICE)
     print(sum(p.numel() for p in model.parameters()) / 1e6, 'M parameters')
 
     # Training
-    optimizers, use_grad_scaler = create_optimizer(model, use_muon=args.use_muon)
-    train(model, optimizers, train_data, val_data, device, scaler, max_iters, use_grad_scaler=use_grad_scaler)
+    optimizers, use_grad_scaler = create_optimizer(model, train_data, use_muon=args.use_muon)
+    train(
+        model, optimizers, train_data, val_data,
+        DEVICE, scaler, MAX_ITERS,
+        use_grad_scaler=use_grad_scaler
+    )
 
     # Generate some text
-    context = torch.zeros((1, 1), dtype=torch.long, device=device)
+    context = torch.zeros((1, 1), dtype=torch.long, device=DEVICE)
     print(decode(model.generate(context, max_new_tokens=2000)[0].tolist()))

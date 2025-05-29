@@ -1,12 +1,21 @@
-import torch
+from typing import Tuple, Callable, List
 from tqdm import tqdm
 from transformers import GPT2Tokenizer
+import torch
 import pandas as pd
 
 ENCODED_TEXTS_PATH = 'encoded_texts.pt'
 CHUNK_SIZE = 1024
 
-def prepare_data(file_path, model_name="gpt2"):
+def prepare_data(
+    file_path: str,
+    model_name: str ="gpt2"
+) -> Tuple[
+    torch.Tensor,
+    int,
+    Callable[[str], List[int]],
+    Callable[[List[int]], str]
+]:
     dp = pd.read_parquet(file_path)
     texts = dp['text'].tolist()
     tokenizer = GPT2Tokenizer.from_pretrained(model_name)
@@ -31,7 +40,10 @@ def prepare_data(file_path, model_name="gpt2"):
     return data, tokenizer.vocab_size, tokenizer.encode, tokenizer.decode
 
 
-def split_data(data, train_ratio=0.9):
+def split_data(
+    data: torch.Tensor,
+    train_ratio: float = 0.9
+) -> Tuple[torch.Tensor, torch.Tensor]:
     n = int(train_ratio * len(data))
     train_data = data[:n]
     val_data = data[n:]

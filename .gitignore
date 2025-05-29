@@ -5,3 +5,15 @@ datasets/
 .DS_Store
 encoded_texts.pt
 model.pth
+*.aux
+*.bbl
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.pdf
+*.synctex.gz
+*.nav
+*.snm
+train_vocab.py

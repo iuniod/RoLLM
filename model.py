@@ -1,10 +1,18 @@
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
+from typing import Optional, Tuple
 from rotary_embedding_torch import RotaryEmbedding
+from torch import nn
+from torch.nn import functional as F
+import torch
 
 class Head(nn.Module):
-    def __init__(self, n_embd, head_size, block_size, dropout, use_rope=False):
+    def __init__(
+        self,
+        n_embd: int,
+        head_size: int,
+        block_size: int,
+        dropout: float,
+        use_rope: bool = False
+    ) -> None:
         super().__init__()
         self.use_rope = use_rope
         self.key = nn.Linear(n_embd, head_size, bias=False)
@@ -17,8 +25,8 @@ class Head(nn.Module):
         if self.use_rope:
             self.rotary_emb = RotaryEmbedding(dim = head_size, use_xpos = True)
 
-    def forward(self, x):
-        B, T, C = x.shape
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        _, T, C = x.shape
         k = self.key(x) # (B, T, head_size)
         q = self.query(x) # (B, T, head_size)
 
@@ -36,20 +44,29 @@ class Head(nn.Module):
         return wei @ v
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, n_embd, num_heads, block_size, dropout, use_rope=False):
+    def __init__(
+        self,
+        n_embd: int,
+        num_heads: int,
+        block_size: int,
+        dropout: float,
+        use_rope: bool = False,
+    ) -> None:
         super().__init__()
         head_size = n_embd // num_heads
-        self.heads = nn.ModuleList([Head(n_embd, head_size, block_size, dropout, use_rope) for _ in range(num_heads)])
+        self.heads = nn.ModuleList(
+            [Head(n_embd, head_size, block_size, dropout, use_rope) for _ in range(num_heads)]
+        )
         self.proj = nn.Linear(n_embd, n_embd)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.cat([h(x) for h in self.heads], dim=-1)
         out = self.dropout(self.proj(out))
         return out
 
 class FeedFoward(nn.Module):
-    def __init__(self, n_embd, dropout):
+    def __init__(self, n_embd: int, dropout: float) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_embd, 4 * n_embd),
@@ -58,24 +75,41 @@ class FeedFoward(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
 class Block(nn.Module):
-    def __init__(self, n_embd, n_head, block_size, dropout, use_rope=False):
+    def __init__(
+        self,
+        n_embd: int,
+        n_head: int,
+        block_size: int,
+        dropout: float,
+        use_rope: bool = False,
+    ) -> None:
         super().__init__()
         self.sa = MultiHeadAttention(n_embd, n_head, block_size, dropout, use_rope)
         self.ffwd = FeedFoward(n_embd, dropout)
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.sa(self.ln1(x))
         x = x + self.ffwd(self.ln2(x))
         return x
 
 class LanguageModel(nn.Module):
-    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, use_rope=False, use_unet_skip=False):
+    def __init__(
+        self,
+        vocab_size: int,
+        n_embd: int,
+        block_size: int,
+        n_head: int,
+        n_layer: int,
+        dropout: float,
+        use_rope: bool = False,
+        use_unet_skip: bool = False,
+    ) -> None:
         super().__init__()
         self.use_rope = use_rope
         self.use_unet_skip = use_unet_skip
@@ -105,7 +139,7 @@ class LanguageModel(nn.Module):
 
         self.apply(self._init_weights)
 
-    def _init_weights(self, module):
+    def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear):
             nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
@@ -113,7 +147,11 @@ class LanguageModel(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(
+        self,
+        idx: torch.LongTensor,
+        targets: Optional[torch.LongTensor] = None
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx)
 
@@ -152,7 +190,11 @@ class LanguageModel(nn.Module):
 
         return logits, loss
 
-    def generate(self, idx, max_new_tokens):
+    def generate(
+        self,
+        idx: torch.LongTensor,
+        max_new_tokens: int
+    ) -> torch.LongTensor:
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.block_size:]
             logits, _ = self(idx_cond)
