@@ -11,3 +11,4 @@ wandb
 git+https://github.com/KellerJordan/Muon
 argparse
 rotary-embedding-torch
+tokenmonster

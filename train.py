@@ -293,6 +293,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use_rope", action="store_true", help="Use Rotary Positional Embedding.")
     parser.add_argument("--use_unet_skip", action="store_true", help="Use U-Net skip connections.")
+    parser.add_argument(
+        "--use_tokenmonster", action="store_true", help="Use TokenMonster for tokenization."
+    )
     args = parser.parse_args()
 
     # Initialize distributed training if using Muon
@@ -305,7 +308,13 @@ if __name__ == "__main__":
 
     scaler = torch.amp.GradScaler('cuda')
 
-    data, vocab_size, encode, decode = prepare_data('./datasets/ro_part_00000_cleaned.parquet')
+    # Prepare data for GPT-2 tokenizer or TokenMonster
+    if args.use_tokenmonster:
+        data, vocab_size, encode, decode = prepare_data(
+            './datasets/ro_part_00000_cleaned.parquet', use_tokenmonster=True, model_name="./tokenmonster/file.vocab"
+        )
+    else:
+        data, vocab_size, encode, decode = prepare_data('./datasets/ro_part_00000_cleaned.parquet')
     train_data, val_data = split_data(data)
 
     model = LanguageModel(
