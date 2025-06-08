@@ -10,6 +10,7 @@ from torch import optim
 from tqdm import tqdm
 from muon import Muon
 from data_utils import prepare_data, split_data
+from transformers import GPT2Model, GPT2Config
 from model import LanguageModel
 
 def setup_distributed() -> None:
@@ -296,7 +297,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_tokenmonster", action="store_true", help="Use TokenMonster for tokenization."
     )
+    parser.add_argument("--use_gpt2", action="store_true", help="Use GPT-2 model for training. All other options will be ignored.")
     args = parser.parse_args()
+
+    if args.use_gpt2:
+        print("Using GPT-2 model. All other options will be ignored.")
+        args.use_rope = False
+        args.use_unet_skip = False
+        args.use_tokenmonster = False
+        args.use_muon = False
 
     # Initialize distributed training if using Muon
     if args.use_muon:
@@ -311,16 +320,31 @@ if __name__ == "__main__":
     # Prepare data for GPT-2 tokenizer or TokenMonster
     if args.use_tokenmonster:
         data, vocab_size, encode, decode = prepare_data(
-            './datasets/ro_part_00000_cleaned.parquet', use_tokenmonster=True, model_name="./tokenmonster/file.vocab"
+            './datasets/ro_part_00000_cleaned.parquet', use_tokenmonster=True,
+            pretrained_model_name_or_path="./tokenmonster/file.vocab"
         )
     else:
         data, vocab_size, encode, decode = prepare_data('./datasets/ro_part_00000_cleaned.parquet')
     train_data, val_data = split_data(data)
 
-    model = LanguageModel(
-        vocab_size, N_EMBD, BLOCK_SIZE, N_HEAD, N_LAYER, DROPOUT,
-        use_rope=args.use_rope, use_unet_skip=args.use_unet_skip
-    ).to(DEVICE)
+    model = None
+    if args.use_gpt2:
+        # Use GPT-2 model
+        config = GPT2Config(
+            vocab_size=vocab_size,
+            n_positions=BLOCK_SIZE,
+            n_embd=N_EMBD,
+            n_layer=N_LAYER,
+            n_head=N_HEAD,
+            resid_pdrop=DROPOUT
+        )
+        model = GPT2Model(config).to(DEVICE)
+    else:
+        model = LanguageModel(
+            vocab_size, N_EMBD, BLOCK_SIZE, N_HEAD, N_LAYER, DROPOUT,
+            use_rope=args.use_rope, use_unet_skip=args.use_unet_skip
+        ).to(DEVICE)
+
     print(sum(p.numel() for p in model.parameters()) / 1e6, 'M parameters')
 
     # Training
@@ -330,7 +354,3 @@ if __name__ == "__main__":
         DEVICE, scaler, MAX_ITERS,
         use_grad_scaler=use_grad_scaler
     )
-
-    # Generate some text
-    context = torch.zeros((1, 1), dtype=torch.long, device=DEVICE)
-    print(decode(model.generate(context, max_new_tokens=2000)[0].tolist()))
